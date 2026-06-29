@@ -3,7 +3,7 @@ name: Deploy Image Thumbnail Service
 on:
   push:
     branches:
-      - main
+    - main
   workflow_dispatch:
 
 env:
@@ -17,584 +17,585 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+        cache: true
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
 
-      - name: Install SAM CLI
-        run: |
-          pip install aws-sam-cli
+    - name: Install SAM CLI
+      run: |
+        pip install aws-sam-cli
 
-      - name: Ensure S3 buckets exist
-        id: check-bucket
-        run: |
-          IMAGE_BUCKET="${{ vars.S3_BUCKET }}"
-          WEBSITE_BUCKET="${IMAGE_BUCKET}-web"
+    - name: Ensure S3 buckets exist
+      id: check-bucket
+      run: |
+        IMAGE_BUCKET="${{ vars.S3_BUCKET }}"
+        WEBSITE_BUCKET="${IMAGE_BUCKET}-web"
 
-          echo "Image bucket: ${IMAGE_BUCKET}"
-          echo "Website bucket: ${WEBSITE_BUCKET}"
+        echo "Image bucket: ${IMAGE_BUCKET}"
+        echo "Website bucket: ${WEBSITE_BUCKET}"
 
-          # Create image bucket if it doesn't exist
-          if aws s3api head-bucket --bucket "${IMAGE_BUCKET}" 2>/dev/null; then
-            echo "Image bucket ${IMAGE_BUCKET} already exists"
+        # Create image bucket if it doesn't exist
+        if aws s3api head-bucket --bucket "${IMAGE_BUCKET}" 2>/dev/null; then
+          echo "Image bucket ${IMAGE_BUCKET} already exists"
+        else
+          echo "Creating image bucket: ${IMAGE_BUCKET}"
+          # us-east-1 doesn't use LocationConstraint
+          if [ "${AWS_REGION}" = "us-east-1" ]; then
+            aws s3api create-bucket --bucket "${IMAGE_BUCKET}" --region ${AWS_REGION}
           else
-            echo "Creating image bucket: ${IMAGE_BUCKET}"
-            # us-east-1 doesn't use LocationConstraint
-            if [ "${AWS_REGION}" = "us-east-1" ]; then
-              aws s3api create-bucket --bucket "${IMAGE_BUCKET}" --region ${AWS_REGION}
-            else
-              aws s3api create-bucket --bucket "${IMAGE_BUCKET}" --region ${AWS_REGION} \
-                --create-bucket-configuration LocationConstraint=${AWS_REGION}
-            fi
-
-            # Enable versioning on image bucket
-            aws s3api put-bucket-versioning \
-              --bucket "${IMAGE_BUCKET}" \
-              --versioning-configuration Status=Enabled
-
-            echo "Image bucket created with versioning enabled"
+            aws s3api create-bucket --bucket "${IMAGE_BUCKET}" --region ${AWS_REGION} \
+              --create-bucket-configuration LocationConstraint=${AWS_REGION}
           fi
 
-          # Create website bucket if it doesn't exist
-          if aws s3api head-bucket --bucket "${WEBSITE_BUCKET}" 2>/dev/null; then
-            echo "Website bucket ${WEBSITE_BUCKET} already exists"
-          else
-            echo "Creating website bucket: ${WEBSITE_BUCKET}"
-            # us-east-1 doesn't use LocationConstraint
-            if [ "${AWS_REGION}" = "us-east-1" ]; then
-              aws s3api create-bucket --bucket "${WEBSITE_BUCKET}" --region ${AWS_REGION}
-            else
-              aws s3api create-bucket --bucket "${WEBSITE_BUCKET}" --region ${AWS_REGION} \
-                --create-bucket-configuration LocationConstraint=${AWS_REGION}
-            fi
-
-            echo "Website bucket created"
-          fi
-
-          echo "bucket_name=${IMAGE_BUCKET}" >> $GITHUB_OUTPUT
-
-      - name: Configure S3 lifecycle policies
-        run: |
-          IMAGE_BUCKET="${{ vars.S3_BUCKET }}"
-
-          echo "Configuring lifecycle policies for bucket: ${IMAGE_BUCKET}"
-
-          cat > /tmp/lifecycle.json <<'EOF'
-          {
-            "Rules": [
-              {
-                "ID": "AbortIncompleteMultipartUploads",
-                "Filter": {},
-                "Status": "Enabled",
-                "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
-              },
-              {
-                "ID": "DeleteAfter90Days",
-                "Filter": { "Prefix": "deleted/" },
-                "Status": "Enabled",
-                "Expiration": { "Days": 90 },
-                "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
-              },
-              {
-                "ID": "RejectedTransitionAndExpire",
-                "Filter": { "Prefix": "rejected/" },
-                "Status": "Enabled",
-                "Transitions": [
-                  { "Days": 30, "StorageClass": "STANDARD_IA" }
-                ],
-                "Expiration": { "Days": 365 },
-                "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }
-              },
-              {
-                "ID": "DeleteProjectZipsAfter30Days",
-                "Filter": { "Prefix": "project-zips/" },
-                "Status": "Enabled",
-                "Expiration": { "Days": 30 },
-                "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
-              },
-              {
-                "ID": "DeleteCorruptedAfter90Days",
-                "Filter": { "Prefix": "corrupted/" },
-                "Status": "Enabled",
-                "Expiration": { "Days": 90 },
-                "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
-              },
-              {
-                "ID": "ApprovedIntelligentTiering",
-                "Filter": { "Prefix": "approved/" },
-                "Status": "Enabled",
-                "Transitions": [
-                  { "Days": 0, "StorageClass": "INTELLIGENT_TIERING" }
-                ],
-                "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }
-              },
-              {
-                "ID": "ImagesLargeIntelligentTiering",
-                "Filter": {
-                  "And": {
-                    "Prefix": "images/",
-                    "ObjectSizeGreaterThan": 5242880
-                  }
-                },
-                "Status": "Enabled",
-                "Transitions": [
-                  { "Days": 0, "StorageClass": "INTELLIGENT_TIERING" }
-                ]
-              },
-              {
-                "ID": "ExpireOldVersionsImages",
-                "Filter": { "Prefix": "images/" },
-                "Status": "Enabled",
-                "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }
-              },
-              {
-                "ID": "ExpireIncomingOrphans",
-                "Filter": { "Prefix": "incoming/" },
-                "Status": "Enabled",
-                "Expiration": { "Days": 30 },
-                "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
-              }
-            ]
-          }
-          EOF
-
-          aws s3api put-bucket-lifecycle-configuration \
+          # Enable versioning on image bucket
+          aws s3api put-bucket-versioning \
             --bucket "${IMAGE_BUCKET}" \
-            --lifecycle-configuration file:///tmp/lifecycle.json
+            --versioning-configuration Status=Enabled
 
-          echo "S3 lifecycle policies configured:"
-          echo "  - Abort incomplete multipart uploads after 7 days (whole bucket)"
-          echo "  - deleted/  : expire 90d  | noncurrent 7d"
-          echo "  - rejected/ : transition to STANDARD_IA at 30d, expire 365d | noncurrent 30d"
-          echo "  - project-zips/ : expire 30d | noncurrent 7d"
-          echo "  - corrupted/ : expire 90d | noncurrent 7d"
-          echo "  - approved/ : transition to INTELLIGENT_TIERING at 0d | noncurrent 30d"
-          echo "  - images/ (>5MB) : transition to INTELLIGENT_TIERING at 0d (RAWs/originals)"
-          echo "  - images/ : noncurrent 30d (cleanup overwrites/copy+delete)"
-          echo "  - incoming/ : 30d safety expiration | noncurrent 7d"
+          echo "Image bucket created with versioning enabled"
+        fi
 
-      - name: Build SAM application
-        run: |
-          sam build
-
-      - name: Create SAM deployment bucket if needed
-        run: |
-          BUCKET_NAME="sam-deploy-kill-snap-${AWS_REGION}"
-          if ! aws s3 ls "s3://${BUCKET_NAME}" 2>&1 | grep -q 'NoSuchBucket'; then
-            echo "Bucket ${BUCKET_NAME} already exists"
+        # Create website bucket if it doesn't exist
+        if aws s3api head-bucket --bucket "${WEBSITE_BUCKET}" 2>/dev/null; then
+          echo "Website bucket ${WEBSITE_BUCKET} already exists"
+        else
+          echo "Creating website bucket: ${WEBSITE_BUCKET}"
+          # us-east-1 doesn't use LocationConstraint
+          if [ "${AWS_REGION}" = "us-east-1" ]; then
+            aws s3api create-bucket --bucket "${WEBSITE_BUCKET}" --region ${AWS_REGION}
           else
-            echo "Creating SAM deployment bucket: ${BUCKET_NAME}"
-            aws s3 mb "s3://${BUCKET_NAME}" --region ${AWS_REGION} || true
+            aws s3api create-bucket --bucket "${WEBSITE_BUCKET}" --region ${AWS_REGION} \
+              --create-bucket-configuration LocationConstraint=${AWS_REGION}
           fi
 
-          # Apply lifecycle: expire old SAM artifacts and abort stuck multipart uploads.
-          # Idempotent — safe to run on every deploy.
-          cat > /tmp/sam-lifecycle.json <<'EOF'
-          {
-            "Rules": [
-              {
-                "ID": "AbortIncompleteMultipartUploads",
-                "Filter": {},
-                "Status": "Enabled",
-                "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+          echo "Website bucket created"
+        fi
+
+        echo "bucket_name=${IMAGE_BUCKET}" >> $GITHUB_OUTPUT
+
+    - name: Configure S3 lifecycle policies
+      run: |
+        IMAGE_BUCKET="${{ vars.S3_BUCKET }}"
+
+        echo "Configuring lifecycle policies for bucket: ${IMAGE_BUCKET}"
+
+        cat > /tmp/lifecycle.json <<'EOF'
+        {
+          "Rules": [
+            {
+              "ID": "AbortIncompleteMultipartUploads",
+              "Filter": {},
+              "Status": "Enabled",
+              "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+            },
+            {
+              "ID": "DeleteAfter90Days",
+              "Filter": { "Prefix": "deleted/" },
+              "Status": "Enabled",
+              "Expiration": { "Days": 90 },
+              "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
+            },
+            {
+              "ID": "RejectedTransitionAndExpire",
+              "Filter": { "Prefix": "rejected/" },
+              "Status": "Enabled",
+              "Transitions": [
+                { "Days": 30, "StorageClass": "STANDARD_IA" }
+              ],
+              "Expiration": { "Days": 365 },
+              "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }
+            },
+            {
+              "ID": "DeleteProjectZipsAfter30Days",
+              "Filter": { "Prefix": "project-zips/" },
+              "Status": "Enabled",
+              "Expiration": { "Days": 30 },
+              "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
+            },
+            {
+              "ID": "DeleteCorruptedAfter90Days",
+              "Filter": { "Prefix": "corrupted/" },
+              "Status": "Enabled",
+              "Expiration": { "Days": 90 },
+              "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
+            },
+            {
+              "ID": "ApprovedIntelligentTiering",
+              "Filter": { "Prefix": "approved/" },
+              "Status": "Enabled",
+              "Transitions": [
+                { "Days": 0, "StorageClass": "INTELLIGENT_TIERING" }
+              ],
+              "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }
+            },
+            {
+              "ID": "ImagesLargeIntelligentTiering",
+              "Filter": {
+                "And": {
+                  "Prefix": "images/",
+                  "ObjectSizeGreaterThan": 5242880
+                }
               },
-              {
-                "ID": "ExpireSamArtifacts",
-                "Filter": {},
-                "Status": "Enabled",
-                "Expiration": { "Days": 14 },
-                "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
-              }
-            ]
-          }
-          EOF
+              "Status": "Enabled",
+              "Transitions": [
+                { "Days": 0, "StorageClass": "INTELLIGENT_TIERING" }
+              ]
+            },
+            {
+              "ID": "ExpireOldVersionsImages",
+              "Filter": { "Prefix": "images/" },
+              "Status": "Enabled",
+              "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }
+            },
+            {
+              "ID": "ExpireIncomingOrphans",
+              "Filter": { "Prefix": "incoming/" },
+              "Status": "Enabled",
+              "Expiration": { "Days": 30 },
+              "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
+            }
+          ]
+        }
+        EOF
 
-          aws s3api put-bucket-lifecycle-configuration \
-            --bucket "${BUCKET_NAME}" \
-            --lifecycle-configuration file:///tmp/sam-lifecycle.json || true
+        aws s3api put-bucket-lifecycle-configuration \
+          --bucket "${IMAGE_BUCKET}" \
+          --lifecycle-configuration file:///tmp/lifecycle.json
 
-          echo "SAM deploy bucket lifecycle: 14-day expiration + 7-day multipart abort"
-        continue-on-error: true
+        echo "S3 lifecycle policies configured:"
+        echo "  - Abort incomplete multipart uploads after 7 days (whole bucket)"
+        echo "  - deleted/  : expire 90d  | noncurrent 7d"
+        echo "  - rejected/ : transition to STANDARD_IA at 30d, expire 365d | noncurrent 30d"
+        echo "  - project-zips/ : expire 30d | noncurrent 7d"
+        echo "  - corrupted/ : expire 90d | noncurrent 7d"
+        echo "  - approved/ : transition to INTELLIGENT_TIERING at 0d | noncurrent 30d"
+        echo "  - images/ (>5MB) : transition to INTELLIGENT_TIERING at 0d (RAWs/originals)"
+        echo "  - images/ : noncurrent 30d (cleanup overwrites/copy+delete)"
+        echo "  - incoming/ : 30d safety expiration | noncurrent 7d"
 
-      - name: Check and fix stuck CloudFormation stack and clean up resources
-        run: |
-          STACK_STATUS=$(aws cloudformation describe-stacks \
+    - name: Build SAM application
+      run: |
+        sam build
+
+    - name: Create SAM deployment bucket if needed
+      run: |
+        BUCKET_NAME="sam-deploy-kill-snap-${AWS_REGION}"
+        if ! aws s3 ls "s3://${BUCKET_NAME}" 2>&1 | grep -q 'NoSuchBucket'; then
+          echo "Bucket ${BUCKET_NAME} already exists"
+        else
+          echo "Creating SAM deployment bucket: ${BUCKET_NAME}"
+          aws s3 mb "s3://${BUCKET_NAME}" --region ${AWS_REGION} || true
+        fi
+
+        # Apply lifecycle: expire old SAM artifacts and abort stuck multipart uploads.
+        # Idempotent — safe to run on every deploy.
+        cat > /tmp/sam-lifecycle.json <<'EOF'
+        {
+          "Rules": [
+            {
+              "ID": "AbortIncompleteMultipartUploads",
+              "Filter": {},
+              "Status": "Enabled",
+              "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+            },
+            {
+              "ID": "ExpireSamArtifacts",
+              "Filter": {},
+              "Status": "Enabled",
+              "Expiration": { "Days": 14 },
+              "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
+            }
+          ]
+        }
+        EOF
+
+        aws s3api put-bucket-lifecycle-configuration \
+          --bucket "${BUCKET_NAME}" \
+          --lifecycle-configuration file:///tmp/sam-lifecycle.json || true
+
+        echo "SAM deploy bucket lifecycle: 14-day expiration + 7-day multipart abort"
+      continue-on-error: true
+
+    - name: Check and fix stuck CloudFormation stack and clean up resources
+      run: |
+        STACK_STATUS=$(aws cloudformation describe-stacks \
+          --stack-name kill-snap-svc \
+          --region ${AWS_REGION} \
+          --query 'Stacks[0].StackStatus' \
+          --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+
+        echo "Stack status: $STACK_STATUS"
+
+        if [ "$STACK_STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STACK_STATUS" = "REVIEW_IN_PROGRESS" ]; then
+          echo "Stack is in $STACK_STATUS state, deleting..."
+          aws cloudformation delete-stack \
             --stack-name kill-snap-svc \
-            --region ${AWS_REGION} \
-            --query 'Stacks[0].StackStatus' \
-            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
-
-          echo "Stack status: $STACK_STATUS"
-
-          if [ "$STACK_STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STACK_STATUS" = "REVIEW_IN_PROGRESS" ]; then
-            echo "Stack is in $STACK_STATUS state, deleting..."
-            aws cloudformation delete-stack \
-              --stack-name kill-snap-svc \
-              --region ${AWS_REGION}
-
-            echo "Waiting for stack deletion..."
-            aws cloudformation wait stack-delete-complete \
-              --stack-name kill-snap-svc \
-              --region ${AWS_REGION}
-
-            echo "Stack deleted successfully"
-            STACK_STATUS="DOES_NOT_EXIST"
-          elif [ "$STACK_STATUS" = "DOES_NOT_EXIST" ]; then
-            echo "Stack does not exist, proceeding with deployment"
-          else
-            echo "Stack status: $STACK_STATUS"
-          fi
-
-          # If stack doesn't exist, clean up any retained resources (except S3 buckets which are managed separately)
-          if [ "$STACK_STATUS" = "DOES_NOT_EXIST" ]; then
-            echo "Checking for retained resources to clean up..."
-
-            # Delete DynamoDB tables (they have Retain policy)
-            TABLES_TO_DELETE=""
-            for TABLE in kill-snap-ImageMetadata kill-snap-Users kill-snap-ReviewGroups; do
-              if aws dynamodb describe-table --table-name ${TABLE} --region ${AWS_REGION} 2>&1 | grep -q "TableName"; then
-                echo "Deleting retained DynamoDB table: ${TABLE}"
-                aws dynamodb delete-table --table-name ${TABLE} --region ${AWS_REGION} || true
-                TABLES_TO_DELETE="${TABLES_TO_DELETE} ${TABLE}"
-              else
-                echo "DynamoDB table ${TABLE} does not exist"
-              fi
-            done
-
-            # Wait for DynamoDB tables to finish deleting
-            for TABLE in ${TABLES_TO_DELETE}; do
-              echo "Waiting for table ${TABLE} to finish deleting..."
-              aws dynamodb wait table-not-exists --table-name ${TABLE} --region ${AWS_REGION} || true
-              echo "Table ${TABLE} deleted"
-            done
-
-            # Delete Lambda functions if they exist
-            for FUNC in ImageThumbnailGenerator ImageReviewApi; do
-              if aws lambda get-function --function-name ${FUNC} --region ${AWS_REGION} 2>&1 | grep -q "FunctionName"; then
-                echo "Deleting Lambda function: ${FUNC}"
-                aws lambda delete-function --function-name ${FUNC} --region ${AWS_REGION} || true
-              else
-                echo "Lambda function ${FUNC} does not exist"
-              fi
-            done
-
-            # Delete CloudWatch log groups (they persist after Lambda deletion)
-            for FUNC in ImageThumbnailGenerator ImageReviewApi; do
-              LOG_GROUP="/aws/lambda/${FUNC}"
-              if aws logs describe-log-groups --log-group-name-prefix ${LOG_GROUP} --region ${AWS_REGION} 2>&1 | grep -q "logGroupName"; then
-                echo "Deleting CloudWatch log group: ${LOG_GROUP}"
-                aws logs delete-log-group --log-group-name ${LOG_GROUP} --region ${AWS_REGION} || true
-              else
-                echo "Log group ${LOG_GROUP} does not exist"
-              fi
-            done
-
-            # Delete API Gateway REST APIs (if they exist with specific name patterns)
-            API_NAME="kill-snap-svc"
-            API_ID=$(aws apigateway get-rest-apis --region ${AWS_REGION} --query "items[?name=='${API_NAME}'].id" --output text 2>/dev/null || echo "")
-            if [ -n "$API_ID" ]; then
-              echo "Deleting API Gateway: ${API_NAME} (ID: ${API_ID})"
-              aws apigateway delete-rest-api --rest-api-id ${API_ID} --region ${AWS_REGION} || true
-            else
-              echo "API Gateway ${API_NAME} does not exist"
-            fi
-
-            # Delete IAM roles created by SAM (they persist after stack deletion)
-            echo "Cleaning up IAM roles created by SAM..."
-            for ROLE in $(aws iam list-roles --query "Roles[?contains(RoleName, 'kill-snap-svc')].RoleName" --output text 2>/dev/null || echo ""); do
-              if [ -n "$ROLE" ]; then
-                echo "Deleting IAM role: ${ROLE}"
-                # Detach managed policies first
-                for POLICY_ARN in $(aws iam list-attached-role-policies --role-name ${ROLE} --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || echo ""); do
-                  echo "  Detaching policy: ${POLICY_ARN}"
-                  aws iam detach-role-policy --role-name ${ROLE} --policy-arn ${POLICY_ARN} 2>/dev/null || true
-                done
-                # Delete inline policies
-                for POLICY_NAME in $(aws iam list-role-policies --role-name ${ROLE} --query 'PolicyNames[]' --output text 2>/dev/null || echo ""); do
-                  echo "  Deleting inline policy: ${POLICY_NAME}"
-                  aws iam delete-role-policy --role-name ${ROLE} --policy-name ${POLICY_NAME} 2>/dev/null || true
-                done
-                # Delete the role
-                aws iam delete-role --role-name ${ROLE} 2>/dev/null || true
-                echo "  Deleted role: ${ROLE}"
-              fi
-            done
-
-            echo "Resource cleanup complete. CloudFormation will create them as managed resources."
-            echo "Waiting 30 seconds for AWS to fully propagate deletions..."
-            sleep 30
-          fi
-        continue-on-error: true
-
-      - name: Package and inspect SAM template
-        run: |
-          # Package the template to see what's being generated
-          sam package \
-            --output-template-file .aws-sam/packaged-template.yaml \
-            --s3-bucket sam-deploy-kill-snap-us-east-2 \
             --region ${AWS_REGION}
 
-          echo "=== Generated CloudFormation Template ==="
-          cat .aws-sam/packaged-template.yaml
-
-      - name: Deploy SAM application
-        id: deploy
-        run: |
-          # Pass all parameters including custom domain configuration
-          PARAMS="S3BucketName=${{ steps.check-bucket.outputs.bucket_name }} \
-            AdminUsername=${{ vars.ADMIN_USER }} \
-            AdminPassword=${{ secrets.ADMIN_PASSWORD }} \
-            DomainName=${{ vars.DOMAIN_NAME }} \
-            HostedZoneId=${{ vars.HOSTED_ZONE_ID }} \
-            CloudFrontCertificateArn=${{ vars.CLOUDFRONT_CERT_ARN }}"
-
-          # Only add OpenAIApiKey if it's set (not empty)
-          if [ -n "${{ secrets.OPENAPI_TOKEN }}" ]; then
-            PARAMS="${PARAMS} OpenAIApiKey=${{ secrets.OPENAPI_TOKEN }}"
-          fi
-
-          sam deploy \
-            --template-file .aws-sam/packaged-template.yaml \
+          echo "Waiting for stack deletion..."
+          aws cloudformation wait stack-delete-complete \
             --stack-name kill-snap-svc \
-            --region ${AWS_REGION} \
-            --capabilities CAPABILITY_IAM \
-            --s3-bucket sam-deploy-kill-snap-us-east-2 \
-            --tags Project=kill-snap CostCenter=utility Environment=prod ManagedBy=sam DeployedVia=github-actions Owner=jeremy \
-            --parameter-overrides ${PARAMS} \
-            --no-fail-on-empty-changeset
-        continue-on-error: true
+            --region ${AWS_REGION}
 
-      - name: Debug deployment failure
-        if: steps.deploy.outcome == 'failure'
-        run: |
-          echo "Deployment failed. Checking CloudFormation events..."
-          aws cloudformation describe-stack-events \
-            --stack-name kill-snap-svc \
-            --region ${AWS_REGION} \
-            --max-items 10 \
-            --query 'StackEvents[?ResourceStatus==`CREATE_FAILED` || contains(ResourceStatusReason, `validation`) || contains(ResourceStatusReason, `ResourceExistenceCheck`)]' \
-            --output json
-          exit 1
+          echo "Stack deleted successfully"
+          STACK_STATUS="DOES_NOT_EXIST"
+        elif [ "$STACK_STATUS" = "DOES_NOT_EXIST" ]; then
+          echo "Stack does not exist, proceeding with deployment"
+        else
+          echo "Stack status: $STACK_STATUS"
+        fi
 
-      - name: Configure S3 event notification to SQS
-        continue-on-error: true
-        run: |
-          # Get bucket name from CloudFormation outputs
-          IMAGE_BUCKET=$(aws cloudformation describe-stacks \
-            --stack-name kill-snap-svc \
-            --query 'Stacks[0].Outputs[?OutputKey==`ImageBucketName`].OutputValue' \
-            --output text)
+        # If stack doesn't exist, clean up any retained resources (except S3 buckets which are managed separately)
+        if [ "$STACK_STATUS" = "DOES_NOT_EXIST" ]; then
+          echo "Checking for retained resources to clean up..."
 
-          # Get SQS Queue ARN from stack outputs
-          SQS_QUEUE_ARN=$(aws cloudformation describe-stacks \
-            --stack-name kill-snap-svc \
-            --query 'Stacks[0].Outputs[?OutputKey==`ImageProcessingQueueArn`].OutputValue' \
-            --output text)
+          # Delete DynamoDB tables (they have Retain policy)
+          TABLES_TO_DELETE=""
+          for TABLE in kill-snap-ImageMetadata kill-snap-Users kill-snap-ReviewGroups; do
+            if aws dynamodb describe-table --table-name ${TABLE} --region ${AWS_REGION} 2>&1 | grep -q "TableName"; then
+              echo "Deleting retained DynamoDB table: ${TABLE}"
+              aws dynamodb delete-table --table-name ${TABLE} --region ${AWS_REGION} || true
+              TABLES_TO_DELETE="${TABLES_TO_DELETE} ${TABLE}"
+            else
+              echo "DynamoDB table ${TABLE} does not exist"
+            fi
+          done
 
-          echo "SQS Queue ARN: ${SQS_QUEUE_ARN}"
-          echo "Configuring S3 notifications for bucket: ${IMAGE_BUCKET}"
+          # Wait for DynamoDB tables to finish deleting
+          for TABLE in ${TABLES_TO_DELETE}; do
+            echo "Waiting for table ${TABLE} to finish deleting..."
+            aws dynamodb wait table-not-exists --table-name ${TABLE} --region ${AWS_REGION} || true
+            echo "Table ${TABLE} deleted"
+          done
 
-          # Configure S3 bucket notification to send to SQS for JPG and RAW file extensions
-          # SQS provides: retry with backoff, DLQ for failures, and better reliability
-          # RAW files: CR2/CR3 (Canon), NEF (Nikon), ARW (Sony), ORF (Olympus), RW2 (Panasonic), RAF (Fuji), DNG (Adobe)
-          cat > /tmp/notification.json <<EOF
-          {
-            "QueueConfigurations": [
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".jpg"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".JPG"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".jpeg"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".JPEG"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".cr2"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".CR2"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".cr3"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".CR3"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".nef"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".NEF"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".arw"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".ARW"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".orf"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".ORF"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".rw2"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".RW2"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".raf"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".RAF"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".dng"}] } }
-              },
-              {
-                "QueueArn": "${SQS_QUEUE_ARN}",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".DNG"}] } }
-              }
-            ]
-          }
-          EOF
+          # Delete Lambda functions if they exist
+          for FUNC in ImageThumbnailGenerator ImageReviewApi; do
+            if aws lambda get-function --function-name ${FUNC} --region ${AWS_REGION} 2>&1 | grep -q "FunctionName"; then
+              echo "Deleting Lambda function: ${FUNC}"
+              aws lambda delete-function --function-name ${FUNC} --region ${AWS_REGION} || true
+            else
+              echo "Lambda function ${FUNC} does not exist"
+            fi
+          done
 
-          aws s3api put-bucket-notification-configuration \
-            --bucket ${IMAGE_BUCKET} \
-            --notification-configuration file:///tmp/notification.json
+          # Delete CloudWatch log groups (they persist after Lambda deletion)
+          for FUNC in ImageThumbnailGenerator ImageReviewApi; do
+            LOG_GROUP="/aws/lambda/${FUNC}"
+            if aws logs describe-log-groups --log-group-name-prefix ${LOG_GROUP} --region ${AWS_REGION} 2>&1 | grep -q "logGroupName"; then
+              echo "Deleting CloudWatch log group: ${LOG_GROUP}"
+              aws logs delete-log-group --log-group-name ${LOG_GROUP} --region ${AWS_REGION} || true
+            else
+              echo "Log group ${LOG_GROUP} does not exist"
+            fi
+          done
 
-      - name: Build and deploy web frontend
-        run: |
-          # Get CloudFormation outputs needed for frontend build
-          IMAGE_CDN_URL=$(aws cloudformation describe-stacks \
-            --stack-name kill-snap-svc \
-            --query 'Stacks[0].Outputs[?OutputKey==`ImageCDNUrl`].OutputValue' \
-            --output text)
-
-          echo "Image CDN URL: ${IMAGE_CDN_URL}"
-
-          # Validate CDN URL was retrieved (should start with https://)
-          if [[ ! "${IMAGE_CDN_URL}" =~ ^https:// ]]; then
-            echo "ERROR: Failed to get valid Image CDN URL from CloudFormation"
-            echo "Got: '${IMAGE_CDN_URL}'"
-            exit 1
-          fi
-
-          cd web
-          npm install
-
-          # Build with environment variables - export to ensure React picks it up
-          export REACT_APP_IMAGE_CDN_URL="${IMAGE_CDN_URL}"
-          npm run build
-
-          # Verify CDN URL is in the build
-          if grep -q "cloudfront" build/static/js/*.js; then
-            echo "✓ CDN URL successfully embedded in frontend build"
+          # Delete API Gateway REST APIs (if they exist with specific name patterns)
+          API_NAME="kill-snap-svc"
+          API_ID=$(aws apigateway get-rest-apis --region ${AWS_REGION} --query "items[?name=='${API_NAME}'].id" --output text 2>/dev/null || echo "")
+          if [ -n "$API_ID" ]; then
+            echo "Deleting API Gateway: ${API_NAME} (ID: ${API_ID})"
+            aws apigateway delete-rest-api --rest-api-id ${API_ID} --region ${AWS_REGION} || true
           else
-            echo "WARNING: CDN URL may not be in build, checking..."
-            grep -o 'getImageUrl[^}]*}' build/static/js/*.js | head -1
+            echo "API Gateway ${API_NAME} does not exist"
           fi
 
-          # Get website bucket name from CloudFormation outputs
-          WEBSITE_BUCKET=$(aws cloudformation describe-stacks \
-            --stack-name kill-snap-svc \
-            --query 'Stacks[0].Outputs[?OutputKey==`WebsiteBucketName`].OutputValue' \
-            --output text)
+          # Delete IAM roles created by SAM (they persist after stack deletion)
+          echo "Cleaning up IAM roles created by SAM..."
+          for ROLE in $(aws iam list-roles --query "Roles[?contains(RoleName, 'kill-snap-svc')].RoleName" --output text 2>/dev/null || echo ""); do
+            if [ -n "$ROLE" ]; then
+              echo "Deleting IAM role: ${ROLE}"
+              # Detach managed policies first
+              for POLICY_ARN in $(aws iam list-attached-role-policies --role-name ${ROLE} --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || echo ""); do
+                echo "  Detaching policy: ${POLICY_ARN}"
+                aws iam detach-role-policy --role-name ${ROLE} --policy-arn ${POLICY_ARN} 2>/dev/null || true
+              done
+              # Delete inline policies
+              for POLICY_NAME in $(aws iam list-role-policies --role-name ${ROLE} --query 'PolicyNames[]' --output text 2>/dev/null || echo ""); do
+                echo "  Deleting inline policy: ${POLICY_NAME}"
+                aws iam delete-role-policy --role-name ${ROLE} --policy-name ${POLICY_NAME} 2>/dev/null || true
+              done
+              # Delete the role
+              aws iam delete-role --role-name ${ROLE} 2>/dev/null || true
+              echo "  Deleted role: ${ROLE}"
+            fi
+          done
 
-          echo "Deploying to website bucket: ${WEBSITE_BUCKET}"
+          echo "Resource cleanup complete. CloudFormation will create them as managed resources."
+          echo "Waiting 30 seconds for AWS to fully propagate deletions..."
+          sleep 30
+        fi
+      continue-on-error: true
 
-          # Sync build folder to S3
-          aws s3 sync build/ s3://${WEBSITE_BUCKET}/ --delete
+    - name: Package and inspect SAM template
+      run: |
+        # Package the template to see what's being generated
+        sam package \
+          --output-template-file .aws-sam/packaged-template.yaml \
+          --s3-bucket sam-deploy-kill-snap-us-east-2 \
+          --region ${AWS_REGION}
 
-          # Get CloudFront distribution ID and invalidate cache
-          DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
-            --stack-name kill-snap-svc \
-            --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
-            --output text)
+        echo "=== Generated CloudFormation Template ==="
+        cat .aws-sam/packaged-template.yaml
 
-          if [ ! -z "$DISTRIBUTION_ID" ]; then
-            echo "Invalidating CloudFront distribution: ${DISTRIBUTION_ID}"
-            aws cloudfront create-invalidation \
-              --distribution-id ${DISTRIBUTION_ID} \
-              --paths "/*"
-          fi
+    - name: Deploy SAM application
+      id: deploy
+      run: |
+        # Pass all parameters including custom domain configuration
+        PARAMS="S3BucketName=${{ steps.check-bucket.outputs.bucket_name }} \
+          AdminUsername=${{ vars.ADMIN_USER }} \
+          AdminPassword=${{ secrets.ADMIN_PASSWORD }} \
+          DomainName=${{ vars.DOMAIN_NAME }} \
+          HostedZoneId=${{ vars.HOSTED_ZONE_ID }} \
+          CloudFrontCertificateArn=${{ vars.CLOUDFRONT_CERT_ARN }}"
 
-      - name: Initialize admin user
-        run: |
-          echo "Triggering API Lambda to initialize admin user..."
+        # Only add OpenAIApiKey if it's set (not empty)
+        if [ -n "${{ secrets.OPENAPI_TOKEN }}" ]; then
+          PARAMS="${PARAMS} OpenAIApiKey=${{ secrets.OPENAPI_TOKEN }}"
+        fi
 
-          # Invoke the Lambda function to trigger admin user creation
-          aws lambda invoke \
-            --function-name ImageReviewApi \
-            --payload '{"httpMethod":"OPTIONS","path":"/api/login"}' \
-            --cli-binary-format raw-in-base64-out \
-            /tmp/lambda-response.json
+        sam deploy \
+          --template-file .aws-sam/packaged-template.yaml \
+          --stack-name kill-snap-svc \
+          --region ${AWS_REGION} \
+          --capabilities CAPABILITY_IAM \
+          --s3-bucket sam-deploy-kill-snap-us-east-2 \
+          --tags Project=kill-snap CostCenter=utility Environment=prod ManagedBy=sam DeployedVia=github-actions Owner=jeremy \
+          --parameter-overrides ${PARAMS} \
+          --no-fail-on-empty-changeset
+      continue-on-error: true
 
-          echo "Lambda invoked. Admin user should be created if it doesn't exist."
-          cat /tmp/lambda-response.json
+    - name: Debug deployment failure
+      if: steps.deploy.outcome == 'failure'
+      run: |
+        echo "Deployment failed. Checking CloudFormation events..."
+        aws cloudformation describe-stack-events \
+          --stack-name kill-snap-svc \
+          --region ${AWS_REGION} \
+          --max-items 10 \
+          --query 'StackEvents[?ResourceStatus==`CREATE_FAILED` || contains(ResourceStatusReason, `validation`) || contains(ResourceStatusReason, `ResourceExistenceCheck`)]' \
+          --output json
+        exit 1
 
-      - name: Output deployment info
-        run: |
-          echo "Deployment completed successfully"
-          echo ""
-          echo "=== CloudFormation Stack Outputs ==="
-          aws cloudformation describe-stacks \
-            --stack-name kill-snap-svc \
-            --query 'Stacks[0].Outputs' \
-            --output table
+    - name: Configure S3 event notification to SQS
+      continue-on-error: true
+      run: |
+        # Get bucket name from CloudFormation outputs
+        IMAGE_BUCKET=$(aws cloudformation describe-stacks \
+          --stack-name kill-snap-svc \
+          --query 'Stacks[0].Outputs[?OutputKey==`ImageBucketName`].OutputValue' \
+          --output text)
+
+        # Get SQS Queue ARN from stack outputs
+        SQS_QUEUE_ARN=$(aws cloudformation describe-stacks \
+          --stack-name kill-snap-svc \
+          --query 'Stacks[0].Outputs[?OutputKey==`ImageProcessingQueueArn`].OutputValue' \
+          --output text)
+
+        echo "SQS Queue ARN: ${SQS_QUEUE_ARN}"
+        echo "Configuring S3 notifications for bucket: ${IMAGE_BUCKET}"
+
+        # Configure S3 bucket notification to send to SQS for JPG and RAW file extensions
+        # SQS provides: retry with backoff, DLQ for failures, and better reliability
+        # RAW files: CR2/CR3 (Canon), NEF (Nikon), ARW (Sony), ORF (Olympus), RW2 (Panasonic), RAF (Fuji), DNG (Adobe)
+        cat > /tmp/notification.json <<EOF
+        {
+          "QueueConfigurations": [
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".jpg"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".JPG"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".jpeg"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".JPEG"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".cr2"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".CR2"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".cr3"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".CR3"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".nef"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".NEF"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".arw"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".ARW"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".orf"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".ORF"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".rw2"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".RW2"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".raf"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".RAF"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".dng"}] } }
+            },
+            {
+              "QueueArn": "${SQS_QUEUE_ARN}",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": { "Key": { "FilterRules": [{"Name": "suffix", "Value": ".DNG"}] } }
+            }
+          ]
+        }
+        EOF
+
+        aws s3api put-bucket-notification-configuration \
+          --bucket ${IMAGE_BUCKET} \
+          --notification-configuration file:///tmp/notification.json
+
+    - name: Build and deploy web frontend
+      run: |
+        # Get CloudFormation outputs needed for frontend build
+        IMAGE_CDN_URL=$(aws cloudformation describe-stacks \
+          --stack-name kill-snap-svc \
+          --query 'Stacks[0].Outputs[?OutputKey==`ImageCDNUrl`].OutputValue' \
+          --output text)
+
+        echo "Image CDN URL: ${IMAGE_CDN_URL}"
+
+        # Validate CDN URL was retrieved (should start with https://)
+        if [[ ! "${IMAGE_CDN_URL}" =~ ^https:// ]]; then
+          echo "ERROR: Failed to get valid Image CDN URL from CloudFormation"
+          echo "Got: '${IMAGE_CDN_URL}'"
+          exit 1
+        fi
+
+        cd web
+        npm install
+
+        # Build with environment variables - export to ensure React picks it up
+        export REACT_APP_IMAGE_CDN_URL="${IMAGE_CDN_URL}"
+        npm run build
+
+        # Verify CDN URL is in the build
+        if grep -q "cloudfront" build/static/js/*.js; then
+          echo "✓ CDN URL successfully embedded in frontend build"
+        else
+          echo "WARNING: CDN URL may not be in build, checking..."
+          grep -o 'getImageUrl[^}]*}' build/static/js/*.js | head -1
+        fi
+
+        # Get website bucket name from CloudFormation outputs
+        WEBSITE_BUCKET=$(aws cloudformation describe-stacks \
+          --stack-name kill-snap-svc \
+          --query 'Stacks[0].Outputs[?OutputKey==`WebsiteBucketName`].OutputValue' \
+          --output text)
+
+        echo "Deploying to website bucket: ${WEBSITE_BUCKET}"
+
+        # Sync build folder to S3
+        aws s3 sync build/ s3://${WEBSITE_BUCKET}/ --delete
+
+        # Get CloudFront distribution ID and invalidate cache
+        DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
+          --stack-name kill-snap-svc \
+          --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
+          --output text)
+
+        if [ ! -z "$DISTRIBUTION_ID" ]; then
+          echo "Invalidating CloudFront distribution: ${DISTRIBUTION_ID}"
+          aws cloudfront create-invalidation \
+            --distribution-id ${DISTRIBUTION_ID} \
+            --paths "/*"
+        fi
+
+    - name: Initialize admin user
+      run: |
+        echo "Triggering API Lambda to initialize admin user..."
+
+        # Invoke the Lambda function to trigger admin user creation
+        aws lambda invoke \
+          --function-name ImageReviewApi \
+          --payload '{"httpMethod":"OPTIONS","path":"/api/login"}' \
+          --cli-binary-format raw-in-base64-out \
+          /tmp/lambda-response.json
+
+        echo "Lambda invoked. Admin user should be created if it doesn't exist."
+        cat /tmp/lambda-response.json
+
+    - name: Output deployment info
+      run: |
+        echo "Deployment completed successfully"
+        echo ""
+        echo "=== CloudFormation Stack Outputs ==="
+        aws cloudformation describe-stacks \
+          --stack-name kill-snap-svc \
+          --query 'Stacks[0].Outputs' \
+          --output table
