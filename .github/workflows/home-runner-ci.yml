@@ -1,0 +1,101 @@
+name: Home Runner CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Runner selection
+        type: choice
+        default: auto
+        options:
+          - auto
+          - home
+          - github-hosted
+
+permissions:
+  contents: read
+
+jobs:
+  route:
+    name: Pick runner
+    runs-on: ubuntu-24.04
+    outputs:
+      runs_on: ${{ steps.pick.outputs.runs_on }}
+      picked: ${{ steps.pick.outputs.picked }}
+    steps:
+      - id: pick
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_QUERY_TOKEN }}
+          REQUESTED_RUNNER: ${{ inputs.runner || 'auto' }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          home_runner='["self-hosted","Linux","X64","home","tiny310","kill-snap"]'
+          hosted_runner='"ubuntu-24.04"'
+
+          if [ "$REQUESTED_RUNNER" = "github-hosted" ]; then
+            echo "runs_on=$hosted_runner" >> "$GITHUB_OUTPUT"
+            echo "picked=github-hosted-forced" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$REQUESTED_RUNNER" = "home" ]; then
+            echo "runs_on=$home_runner" >> "$GITHUB_OUTPUT"
+            echo "picked=home-forced" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          online_idle="$({
+            gh api "orgs/JeremyProffittOrg/actions/runners?per_page=100" \
+              --jq '.runners[]
+                | select(.status == "online" and .busy == false)
+                | select([.labels[].name] | contains(["self-hosted","Linux","X64","home","tiny310","kill-snap"]))
+                | .id' \
+              | head -n 1
+          } 2>/dev/null || true)"
+
+          if [ -n "$online_idle" ]; then
+            echo "runs_on=$home_runner" >> "$GITHUB_OUTPUT"
+            echo "picked=home-auto" >> "$GITHUB_OUTPUT"
+          else
+            echo "runs_on=$hosted_runner" >> "$GITHUB_OUTPUT"
+            echo "picked=github-hosted-fallback" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build smoke test
+    needs: route
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    timeout-minutes: 20
+    steps:
+      - name: Runner selection
+        run: |
+          echo "Picked: ${{ needs.route.outputs.picked }}"
+          echo "Runner: $RUNNER_NAME ($RUNNER_OS/$RUNNER_ARCH)"
+          hostname
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Go module smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r mod; do
+            dir="$(dirname "$mod")"
+            echo "== go test $dir =="
+            (cd "$dir" && go test ./...)
+          done < <(find . -name go.mod -not -path './node_modules/*' | sort)
+      - name: Web build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd web
+          npm ci
+          CI=false npm run build
