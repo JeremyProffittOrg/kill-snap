@@ -101,5 +101,5 @@ jobs:
         run: |
           set -euo pipefail
           cd web
-          npm ci
+          npm install
           CI=false npm run build
