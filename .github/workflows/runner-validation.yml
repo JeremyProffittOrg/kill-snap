@@ -7,9 +7,9 @@ permissions:
   contents: read
 
 jobs:
-  tiny310:
-    name: Validate Tiny310 runner
-    runs-on: [self-hosted, home, tiny310, kill-snap]
+  github-hosted:
+    name: Validate GitHub-hosted runner
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Runner identity
