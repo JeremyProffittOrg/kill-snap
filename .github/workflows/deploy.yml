@@ -590,6 +590,44 @@ jobs:
         echo "Lambda invoked. Admin user should be created if it doesn't exist."
         cat /tmp/lambda-response.json
 
+    - name: Tag image bucket with cost-allocation tags
+      run: |
+        # The image bucket is not owned by the CloudFormation stack, so the
+        # stack-level --tags never reach it. put-bucket-tagging REPLACES the
+        # whole tag set, so read the existing tags, merge the required tags
+        # over them, and write the merged set. Idempotent.
+        IMAGE_BUCKET="${{ vars.S3_BUCKET }}"
+
+        if EXISTING=$(aws s3api get-bucket-tagging --bucket "${IMAGE_BUCKET}" --output json 2>/tmp/get-tagging.err); then
+          :
+        elif grep -q "NoSuchTagSet" /tmp/get-tagging.err; then
+          EXISTING='{"TagSet":[]}'
+        else
+          cat /tmp/get-tagging.err
+          exit 1
+        fi
+
+        REQUIRED='[
+          {"Key":"Project","Value":"kill-snap"},
+          {"Key":"CostCenter","Value":"utility"},
+          {"Key":"Environment","Value":"prod"},
+          {"Key":"ManagedBy","Value":"sam"},
+          {"Key":"DeployedVia","Value":"github-actions"},
+          {"Key":"Owner","Value":"jeremy"}
+        ]'
+
+        MERGED=$(echo "${EXISTING}" | jq -c --argjson req "${REQUIRED}" \
+          '{TagSet: ((.TagSet | map(select(.Key as $k | ($req | map(.Key) | index($k)) | not))) + $req)}')
+
+        if [ "$(echo "${EXISTING}" | jq -S '.TagSet | sort_by(.Key)')" = "$(echo "${MERGED}" | jq -S '.TagSet | sort_by(.Key)')" ]; then
+          echo "Bucket ${IMAGE_BUCKET} already carries the required tags"
+        else
+          echo "Writing merged tag set to ${IMAGE_BUCKET}: ${MERGED}"
+          aws s3api put-bucket-tagging --bucket "${IMAGE_BUCKET}" --tagging "${MERGED}"
+        fi
+
+        aws s3api get-bucket-tagging --bucket "${IMAGE_BUCKET}" --output json
+
     - name: Output deployment info
       run: |
         echo "Deployment completed successfully"
