@@ -812,4 +812,3 @@ Outputs:
   ImageProcessingDLQArn:
     Description: Dead Letter Queue ARN for failed image processing
     Value: !GetAtt ImageProcessingDLQ.Arn
-

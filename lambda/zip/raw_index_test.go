@@ -70,3 +70,19 @@ func TestProjectZipKeys(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestRawIndexPreservesMatchingVariantsAndExcludesOriginal(t *testing.T) {
+	index := newRawDirectoryIndex(func(_ *s3.ListObjectsV2Input, next func(*s3.ListObjectsV2Output, bool) bool) error {
+		keys := []string{"projects/a/IMG.CR3", "projects/a/img.dng", "projects/a/other.dng"}
+		var objects []*s3.Object
+		for _, key := range keys {
+			objects = append(objects, &s3.Object{Key: aws.String(key)})
+		}
+		next(&s3.ListObjectsV2Output{Contents: objects}, true)
+		return nil
+	})
+	got, err := index.find("projects/a/IMG.CR3")
+	if err != nil || len(got) != 1 || got[0] != "projects/a/img.dng" {
+		t.Fatalf("matches=%v err=%v", got, err)
+	}
+}
