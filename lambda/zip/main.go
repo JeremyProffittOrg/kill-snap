@@ -157,17 +157,12 @@ func handleRequest(ctx context.Context, request ZipRequest) error {
 
 	var zipFiles []ZipFile
 
+	rawIndex := newRawDirectoryIndex(s3Client.ListObjectsV2Pages)
 	for i, batch := range batches {
-		var zipKey string
-		// Store zips in root of project folder (projects/{s3Prefix}/)
-		if len(batches) == 1 {
-			zipKey = fmt.Sprintf("projects/%s/%s_%s.zip", s3Prefix, sanitizedName, dateStr)
-		} else {
-			zipKey = fmt.Sprintf("projects/%s/%s_%s_part%d.zip", s3Prefix, sanitizedName, dateStr, i+1)
-		}
+		zipKey := projectZipKey(s3Prefix, sanitizedName, dateStr, i+1, len(batches))
 
 		// Create zip file with XMP sidecars for RAW files and EXIF updates for JPGs
-		zipInfo, err := createAndUploadZip(ctx, batch, zipKey, project.Name)
+		zipInfo, err := createAndUploadZip(ctx, batch, zipKey, project.Name, rawIndex)
 		if err != nil {
 			fmt.Printf("Error creating zip %s: %v\n", zipKey, err)
 			// Record failed zip
@@ -392,43 +387,6 @@ func isRAWFile(filename string) bool {
 	return rawExtensions[ext]
 }
 
-// discoverRawFilesInS3 lists the directory containing originalKey and returns
-// any sibling objects whose base name matches and whose extension is a RAW
-// format. Used at zip-time to catch RAWs that weren't recorded in RelatedFiles
-// (e.g. uploaded after addToProject ran, or when the move happened without a
-// DynamoDB update).
-func discoverRawFilesInS3(originalKey string) []string {
-	var found []string
-	if originalKey == "" {
-		return found
-	}
-	dir := filepath.Dir(originalKey)
-	baseNoExt := strings.ToLower(strings.TrimSuffix(filepath.Base(originalKey), filepath.Ext(originalKey)))
-	prefix := dir + "/"
-
-	err := s3Client.ListObjectsV2Pages(&s3.ListObjectsV2Input{
-		Bucket: aws.String(bucketName),
-		Prefix: aws.String(prefix),
-	}, func(page *s3.ListObjectsV2Output, _ bool) bool {
-		for _, obj := range page.Contents {
-			key := aws.StringValue(obj.Key)
-			if key == originalKey {
-				continue
-			}
-			name := filepath.Base(key)
-			stem := strings.ToLower(strings.TrimSuffix(name, filepath.Ext(name)))
-			if stem == baseNoExt && isRAWFile(name) {
-				found = append(found, key)
-			}
-		}
-		return true
-	})
-	if err != nil {
-		fmt.Printf("  WARNING: RAW rescan failed for %s: %v\n", originalKey, err)
-	}
-	return found
-}
-
 // isJPGFile checks if a file extension is a JPG format
 func isJPGFile(filename string) bool {
 	ext := strings.ToLower(filepath.Ext(filename))
@@ -496,7 +454,7 @@ func embedXMPInJPEG(jpegData []byte, xmpContent string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func createAndUploadZip(ctx context.Context, images []ImageRecord, zipKey string, projectName string) (*ZipFile, error) {
+func createAndUploadZip(ctx context.Context, images []ImageRecord, zipKey string, projectName string, rawIndex *rawDirectoryIndex) (*ZipFile, error) {
 	fmt.Printf("=== Creating zip: %s ===\n", zipKey)
 	fmt.Printf("Images to include: %d\n", len(images))
 	fmt.Printf("Project name: %s\n", projectName)
@@ -690,7 +648,13 @@ func createAndUploadZip(ctx context.Context, images []ImageRecord, zipKey string
 		for _, k := range rawKeys {
 			seen[k] = true
 		}
-		for _, k := range discoverRawFilesInS3(img.OriginalFile) {
+		rawFiles, err := rawIndex.find(img.OriginalFile)
+		if err != nil {
+			zipWriter.Close()
+			tmpFile.Close()
+			return nil, fmt.Errorf("discover RAW siblings: %w", err)
+		}
+		for _, k := range rawFiles {
 			if !seen[k] {
 				fmt.Printf("  Discovered unrecorded RAW: %s\n", k)
 				rawKeys = append(rawKeys, k)

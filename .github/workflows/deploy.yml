@@ -85,94 +85,21 @@ jobs:
 
         echo "bucket_name=${IMAGE_BUCKET}" >> $GITHUB_OUTPUT
 
+    - name: Verify ZIP behavior and lifecycle contract
+      run: |
+        (cd lambda/zip && go test ./...)
+        (cd lambda/api && go test ./...)
+        python3 -m unittest discover -s scripts -p test_zip_lifecycle.py
+
     - name: Configure S3 lifecycle policies
       run: |
         IMAGE_BUCKET="${{ vars.S3_BUCKET }}"
 
         echo "Configuring lifecycle policies for bucket: ${IMAGE_BUCKET}"
 
-        cat > /tmp/lifecycle.json <<'EOF'
-        {
-          "Rules": [
-            {
-              "ID": "AbortIncompleteMultipartUploads",
-              "Filter": {},
-              "Status": "Enabled",
-              "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
-            },
-            {
-              "ID": "DeleteAfter90Days",
-              "Filter": { "Prefix": "deleted/" },
-              "Status": "Enabled",
-              "Expiration": { "Days": 90 },
-              "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
-            },
-            {
-              "ID": "RejectedTransitionAndExpire",
-              "Filter": { "Prefix": "rejected/" },
-              "Status": "Enabled",
-              "Transitions": [
-                { "Days": 30, "StorageClass": "STANDARD_IA" }
-              ],
-              "Expiration": { "Days": 365 },
-              "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }
-            },
-            {
-              "ID": "DeleteProjectZipsAfter30Days",
-              "Filter": { "Prefix": "project-zips/" },
-              "Status": "Enabled",
-              "Expiration": { "Days": 30 },
-              "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
-            },
-            {
-              "ID": "DeleteCorruptedAfter90Days",
-              "Filter": { "Prefix": "corrupted/" },
-              "Status": "Enabled",
-              "Expiration": { "Days": 90 },
-              "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
-            },
-            {
-              "ID": "ApprovedIntelligentTiering",
-              "Filter": { "Prefix": "approved/" },
-              "Status": "Enabled",
-              "Transitions": [
-                { "Days": 0, "StorageClass": "INTELLIGENT_TIERING" }
-              ],
-              "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }
-            },
-            {
-              "ID": "ImagesLargeIntelligentTiering",
-              "Filter": {
-                "And": {
-                  "Prefix": "images/",
-                  "ObjectSizeGreaterThan": 5242880
-                }
-              },
-              "Status": "Enabled",
-              "Transitions": [
-                { "Days": 0, "StorageClass": "INTELLIGENT_TIERING" }
-              ]
-            },
-            {
-              "ID": "ExpireOldVersionsImages",
-              "Filter": { "Prefix": "images/" },
-              "Status": "Enabled",
-              "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }
-            },
-            {
-              "ID": "ExpireIncomingOrphans",
-              "Filter": { "Prefix": "incoming/" },
-              "Status": "Enabled",
-              "Expiration": { "Days": 30 },
-              "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
-            }
-          ]
-        }
-        EOF
-
         aws s3api put-bucket-lifecycle-configuration \
           --bucket "${IMAGE_BUCKET}" \
-          --lifecycle-configuration file:///tmp/lifecycle.json
+          --lifecycle-configuration file://lifecycle-policy.json
 
         echo "S3 lifecycle policies configured:"
         echo "  - Abort incomplete multipart uploads after 7 days (whole bucket)"

@@ -2885,6 +2885,11 @@ func handleGetZipDownload(projectID string, zipKey string, headers map[string]st
 		return errorResponse(404, "Zip file not found or not ready", headers)
 	}
 
+	status, message := zipDownloadAvailability(s3Client.HeadObject, bucketName, targetZip.Key)
+	if status != 0 {
+		return errorResponse(status, message, headers)
+	}
+
 	// Generate presigned URL for download
 	filename := targetZip.Key[strings.LastIndex(targetZip.Key, "/")+1:]
 	req, _ := s3Client.GetObjectRequest(&s3.GetObjectInput{
