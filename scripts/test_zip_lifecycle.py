@@ -17,6 +17,13 @@ class ZipLifecycleTest(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/deploy.yml").read_text()
         self.assertIn("file://lifecycle-policy.json", workflow)
         self.assertNotIn("cat > /tmp/lifecycle.json", workflow)
+        template = (ROOT / "template.yaml").read_text()
+        self.assertNotIn("AWS::CloudWatch::Alarm", template)
+        self.assertNotIn("AWS::CloudWatch::Dashboard", template)
+        for package in ("zip", "api"):
+            makefile = (ROOT / "lambda" / package / "Makefile").read_text()
+            self.assertIn("/bootstrap .", makefile)
+            self.assertNotIn("/bootstrap main.go", makefile)
 
 
 if __name__ == "__main__":

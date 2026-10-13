@@ -315,6 +315,11 @@ jobs:
           --output json
         exit 1
 
+    - name: Verify deployed ZIP with an isolated generated fixture
+      run: |
+        python3 -m pip install 'boto3==1.35.49'
+        python3 scripts/smoke_zip.py
+
     - name: Configure S3 event notification to SQS
       continue-on-error: true
       run: |
